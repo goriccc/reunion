@@ -5,3 +5,4 @@ ALTER TABLE prompts
 ADD COLUMN IF NOT EXISTS menu_subtitle TEXT DEFAULT '';
 
 
+

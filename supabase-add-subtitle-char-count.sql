@@ -5,3 +5,4 @@ ALTER TABLE prompts
 ADD COLUMN IF NOT EXISTS subtitle_char_count TEXT DEFAULT '1000';
 
 
+

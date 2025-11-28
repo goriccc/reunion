@@ -5,13 +5,14 @@ import { useState } from 'react'
 
 export default function HomePage() {
   const router = useRouter()
-  const [selectedTab, setSelectedTab] = useState('전체')
+  const [selectedTab, setSelectedTab] = useState('claude-sonnet-4-20250514')
 
   const tabs = [
-    { id: '전체', name: '전체' },
-    { id: '전문사주', name: '전문사주' },
-    { id: '사주타로', name: '사주타로' },
-    { id: '타로', name: '타로' },
+    { id: 'claude-sonnet-4-20250514', name: 'claude-sonnet-4-20250514' },
+    { id: 'claude-3-5-haiku-20241022', name: 'claude-3-5-haiku-20241022' },
+    { id: 'claude-3-haiku-20240307', name: 'claude-3-haiku-20240307' },
+    { id: 'gemini-2.5-pro', name: 'gemini-2.5-pro' },
+    { id: 'gemini-2.5-flash', name: 'gemini-2.5-flash' },
   ]
 
   const products = [
@@ -39,9 +40,8 @@ export default function HomePage() {
     },
   ]
 
-  const filteredProducts = selectedTab === '전체'
-    ? products
-    : products.filter(product => product.category === selectedTab)
+  // 모델 선택에 따라 모든 상품 표시 (필터링 제거)
+  const filteredProducts = products
 
   const formatPrice = (price: number) => {
     return price.toLocaleString('ko-KR')
@@ -49,7 +49,8 @@ export default function HomePage() {
 
   const handleProductClick = (product: typeof products[0]) => {
     const title = encodeURIComponent(product.title)
-    router.push(`/form?title=${title}`)
+    const model = encodeURIComponent(selectedTab)
+    router.push(`/form?title=${title}&model=${model}`)
   }
 
   return (

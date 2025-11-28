@@ -3,12 +3,14 @@
 import { useSearchParams } from 'next/navigation'
 import { Suspense, useEffect, useState } from 'react'
 import { callClaudeAPI, getPrompts, ClaudeResponse, ClaudeMessage } from '@/app/utils/claude'
+import { callGeminiAPI } from '@/app/utils/gemini'
 
 function FormContent() {
   const searchParams = useSearchParams()
   const gc = searchParams.get('gc')
   const ic = searchParams.get('ic')
   const titleParam = searchParams.get('title')
+  const modelParam = searchParams.get('model')
   
   let title = '지금 당장! 나의 \'재회 성공률\'은 몇 %일까?'
   if (titleParam) {
@@ -19,6 +21,9 @@ function FormContent() {
       title = titleParam
     }
   }
+
+  // 모델 정보 (기본값: claude-sonnet-4-20250514)
+  const selectedModel = modelParam ? decodeURIComponent(modelParam) : 'claude-sonnet-4-20250514'
 
   // 제목별 콘텐츠 데이터
   const productContents: Record<string, {
@@ -57,15 +62,43 @@ function FormContent() {
   const [showClaudeResult, setShowClaudeResult] = useState(false)
   const [claudeResult, setClaudeResult] = useState('')
   const [claudeSections, setClaudeSections] = useState<Array<{ title: string; content: string }>>([])
+  // localStorage에서 초기값 불러오기
+  const loadSavedResultsFromStorage = (): Array<{
+    id: string
+    title: string
+    savedAt: string
+    sections: Array<{ title: string; content: string }>
+    model?: string
+    responseTime?: string
+  }> => {
+    if (typeof window === 'undefined') return []
+    try {
+      const raw = localStorage.getItem('saved_claude_results')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          return parsed
+        }
+      }
+    } catch (error) {
+      console.error('저장된 상담 결과를 불러오는 중 오류가 발생했습니다.', error)
+    }
+    return []
+  }
+
   const [savedResults, setSavedResults] = useState<
     Array<{
       id: string
       title: string
       savedAt: string
       sections: Array<{ title: string; content: string }>
+      model?: string
+      responseTime?: string
     }>
-  >([])
+  >(loadSavedResultsFromStorage)
   const [isLoadingClaude, setIsLoadingClaude] = useState(false)
+  const [claudeModel, setClaudeModel] = useState<string>('')
+  const [claudeResponseTime, setClaudeResponseTime] = useState<string>('')
 
   // 본인 정보
   const [selfName, setSelfName] = useState('')
@@ -123,12 +156,25 @@ function FormContent() {
     return productMap[title] || null
   }
 
+  // 시간 포맷팅 함수 (밀리초 → 분:초)
+  const formatTime = (milliseconds: number): string => {
+    const totalSeconds = Math.floor(milliseconds / 1000)
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return `${minutes}:${String(seconds).padStart(2, '0')}`
+  }
+
   const handlePayment = async () => {
     // 본인 정보 검증
     if (!selfName || !selfGender || !selfYear || !selfMonth || !selfDay) {
       alert('본인 정보를 모두 입력해주세요.')
       return
     }
+
+    // 시간 측정 시작 (프롬프트 전송 직전)
+    const startTime = Date.now()
+    setClaudeModel(selectedModel)
+    setClaudeResponseTime('')
 
     setIsLoadingClaude(true)
     setShowPayment(false)
@@ -187,13 +233,14 @@ function FormContent() {
       personalInfoMessage += `태어난 시: ${birthTime}\n\n`
       baseMessages.push({ role: 'user', content: personalInfoMessage })
 
-      const formattingRule = `**중요 출력 형식 규칙:**\n- 마크다운 형식(**텍스트**, ##, ### 등)을 사용하지 마세요.\n- 볼드 표시(**), 이탤릭(*), 헤더(#) 등 모든 마크다운 특수문자를 사용하지 마세요.\n- 소제목은 아래 제공된 "고객 노출용 소제목" 텍스트를 첫 줄에 그대로 사용하세요.\n- 텍스트는 순수한 일반 텍스트로만 작성하세요.\n- 동일한 내용을 반복하지 말고 각 소제목마다 ${charCount}자 내외로 작성하세요.\n\n`
+      const formattingRule = `**중요 출력 형식 규칙:**\n- 마크다운 형식(**텍스트**, ##, ### 등)을 사용하지 마세요.\n- 볼드 표시(**), 이탤릭(*), 헤더(#) 등 모든 마크다운 특수문자를 사용하지 마세요.\n- 구분선 문자(---, === 등)를 절대 사용하지 마세요.\n- 소제목은 아래 제공된 "고객 노출용 소제목" 텍스트를 첫 줄에 **정확히 그대로** 사용하세요.\n- **절대 금지: 제공된 소제목 앞에 추가 번호(예: "1. ", "2. ", "3. ")를 붙이지 마세요.**\n- 제공된 소제목 형식을 그대로 사용하고, 번호를 추가하거나 변경하지 마세요.\n- 예: "1-1. 제목"이 제공되면 "1-1. 제목" 그대로 사용. "1. 1-1. 제목" ❌ 또는 "2. 1-1. 제목" ❌ 같은 형식은 절대 사용하지 마세요.\n- 빈 번호만 있는 줄(예: "1.", "2.")을 생성하지 마세요.\n- 텍스트는 순수한 일반 텍스트로만 작성하세요.\n- 동일한 내용을 반복하지 말고 각 소제목마다 ${charCount}자 내외로 작성하세요.\n\n`
 
       const developerGuide = developerSubtitles.length > 0
         ? developerSubtitles.map((subtitle, idx) => `${idx + 1}. ${subtitle}`).join('\n')
         : ''
+      // displayGuide는 번호를 추가하지 않고 원본 그대로 사용 (Claude가 번호를 중복 추가하는 것을 방지)
       const displayGuide = displaySubtitles.length > 0
-        ? displaySubtitles.map((subtitle, idx) => `${idx + 1}. ${subtitle}`).join('\n')
+        ? displaySubtitles.join('\n')
         : ''
 
       let combinedInstruction = ''
@@ -203,12 +250,27 @@ function FormContent() {
       }
       if (displayGuide) {
         combinedInstruction += `<상품 메뉴 소제목 (고객 노출용)>\n${displayGuide}\n\n`
-        combinedInstruction += `각 소제목 블록은 위 목록의 제목을 첫 줄로 사용한 뒤, 그 아래에 내용을 작성하세요.\n\n`
+        combinedInstruction += `**절대 금지 - 반드시 준수하세요:**\n`
+        combinedInstruction += `- 위 목록에 제공된 소제목을 첫 줄에 **정확히 그대로, 번호를 추가하거나 변경하지 않고** 사용하세요.\n`
+        combinedInstruction += `- **절대 금지: 소제목 앞에 "1. ", "2. ", "3. " 같은 번호를 추가하지 마세요.**\n`
+        combinedInstruction += `- **절대 금지: "1. 1-1. 제목" 같은 형식은 절대 사용하지 마세요.**\n`
+        combinedInstruction += `- 예: 제공된 소제목이 "1-1. 제목"이면 "1-1. 제목" 그대로 사용. "1. 1-1. 제목" ❌\n`
+        combinedInstruction += `- 예: 제공된 소제목이 "제목"이면 "제목" 그대로 사용. "1. 제목" ❌\n`
+        combinedInstruction += `- 각 소제목 블록은 위 목록의 제목을 첫 줄에 그대로 사용한 뒤, 그 아래에 내용을 작성하세요.\n`
+        combinedInstruction += `- 빈 번호만 있는 줄(예: "1.", "2.")을 생성하지 마세요.\n`
+        combinedInstruction += `- 각 소제목은 제공된 제목과 내용만 포함하고, 불필요한 번호나 빈 줄을 만들지 마세요.\n\n`
       }
       combinedInstruction += formattingRule
-      combinedInstruction += `위 정보를 바탕으로 상담 결과를 모두 작성해주세요.`
+      combinedInstruction += `**중요: 반드시 모든 소제목에 대해 완전한 내용을 작성하세요.**\n`
+      combinedInstruction += `- 절대로 "이하 생략", "동일한 방식으로 작성", "생략", "(이하 생략 - 동일한 방식으로 모든 항목 작성)" 등의 표현을 사용하지 마세요.\n`
+      combinedInstruction += `- 각 소제목마다 ${charCount}자 내외로 완전하고 구체적인 내용을 반드시 작성해야 합니다.\n`
+      combinedInstruction += `- 소제목을 건너뛰거나 생략하지 마세요. 모든 소제목에 대해 실제 내용을 작성하세요.\n`
+      combinedInstruction += `- 위 정보를 바탕으로 상담 결과를 모두 완전하게 작성해주세요.`
 
-      const processResponse = (response: ClaudeResponse) => {
+      // 모델이 Gemini인지 확인
+      const isGeminiModel = selectedModel?.startsWith('gemini-')
+
+      const processClaudeResponse = (response: ClaudeResponse) => {
         let resultText = ''
         if (response.content && Array.isArray(response.content)) {
           resultText = response.content
@@ -220,108 +282,298 @@ function FormContent() {
             })
             .join('')
         }
-        const isTruncated = response.stop_reason === 'max_tokens'
+        let isTruncated = response.stop_reason === 'max_tokens'
+        
+        // "(이하 생략)" 같은 표현이 포함되어 있는지 확인
+        const hasOmissionPattern = /\(이하\s*생략|이하\s*생략|동일한\s*방식으로\s*모든\s*항목\s*작성|생략.*동일한\s*방식/i.test(resultText)
+        if (hasOmissionPattern) {
+          console.warn('⚠️ 응답에 생략 표현이 포함되어 있습니다. 이어서 작성 요청을 시도합니다.')
+          // 생략 표현 부분을 제거하고 이어서 작성하도록 표시
+          isTruncated = true
+        }
+        
         if (!resultText) {
           resultText = '결과를 생성할 수 없습니다.'
         }
-        if (isTruncated) {
-          resultText += '\n\n⚠️ [주의: 응답이 토큰 제한(8192 토큰)으로 인해 일부만 생성되었습니다. 이어서 작성 요청을 시도합니다.]'
+        // 경고 메시지 제거 - isTruncated는 내부적으로만 사용
+        return { text: resultText, isTruncated }
+      }
+
+      const processGeminiResponse = (response: { text: string; isTruncated?: boolean; finishReason?: string }) => {
+        let resultText = response.text || ''
+        
+        // API에서 반환한 isTruncated 확인 (MAX_TOKENS 등으로 인한 중단)
+        let isTruncated = response.isTruncated || false
+        
+        // "(이하 생략)" 같은 표현이 포함되어 있는지 확인
+        const hasOmissionPattern = /\(이하\s*생략|이하\s*생략|동일한\s*방식으로\s*모든\s*항목\s*작성|생략.*동일한\s*방식/i.test(resultText)
+        if (hasOmissionPattern) {
+          isTruncated = true
+          console.warn('⚠️ 응답에 생략 표현이 포함되어 있습니다. 이어서 작성 요청을 시도합니다.')
         }
+        
+        // 응답이 중간에 끊겼는지 확인 (마지막 문장이 완전하지 않을 수 있음)
+        if (!isTruncated && resultText.length > 0) {
+          // 마지막 문장이 완전하지 않거나, 예상되는 소제목이 없는 경우
+          const lastChar = resultText.trim().slice(-1)
+          const incompleteEndings = ['.', '!', '?', '다', '요', '니다', '습니다']
+          // 마지막 문자가 완전한 문장 종료 기호가 아니고, 마지막이 "점수"로 끝나면 중간에 끊긴 것으로 간주
+          if (!incompleteEndings.some(ending => resultText.trim().endsWith(ending)) && 
+              resultText.trim().endsWith('점수')) {
+            console.warn('⚠️ 응답이 중간에 끊긴 것으로 보입니다. 이어서 작성 요청을 시도합니다.')
+            isTruncated = true
+          }
+        }
+        
+        if (!resultText) {
+          resultText = '결과를 생성할 수 없습니다.'
+        }
+        
+        console.log('Gemini 응답 처리:', {
+          textLength: resultText.length,
+          isTruncated,
+          finishReason: response.finishReason
+        })
+        
         return { text: resultText, isTruncated }
       }
 
       const fetchFullResponse = async () => {
-        const conversation: ClaudeMessage[] = [
-          ...baseMessages,
-          { role: 'user', content: combinedInstruction }
-        ]
-        let accumulatedText = ''
-        let attempt = 0
-        let continueWriting = true
+        if (isGeminiModel) {
+          // Gemini API 호출
+          const conversation: Array<{ role: 'user' | 'assistant'; content: string }> = []
+          
+          // baseMessages를 Gemini 형식으로 변환
+          baseMessages.forEach(msg => {
+            conversation.push({ role: 'user', content: msg.content })
+          })
+          conversation.push({ role: 'user', content: combinedInstruction })
 
-        while (continueWriting && attempt < 6) {
-          attempt += 1
-          const response = await callClaudeAPI(conversation)
-          const { text, isTruncated } = processResponse(response)
-          accumulatedText += accumulatedText ? `\n\n${text}` : text
+          let accumulatedText = ''
+          let attempt = 0
+          let continueWriting = true
 
-          console.log('=== Claude 전체 응답 ===')
-          console.log('시도 횟수:', attempt)
-          console.log('Stop Reason:', response.stop_reason)
-          console.log('Content Length:', text.length, '자')
-          console.log('Usage:', response.usage)
-          console.log('=======================')
+          while (continueWriting && attempt < 6) {
+            attempt += 1
+            
+            // 전체 대화를 하나의 프롬프트로 합치기
+            let fullPrompt = ''
+            conversation.forEach(msg => {
+              fullPrompt += msg.content + '\n\n'
+            })
+            
+            const response = await callGeminiAPI(conversation, selectedModel)
+            const { text, isTruncated } = processGeminiResponse(response)
+            accumulatedText += accumulatedText ? `\n\n${text}` : text
 
-          if (!isTruncated) {
-            continueWriting = false
-            break
+            console.log('=== Gemini 전체 응답 ===')
+            console.log('시도 횟수:', attempt)
+            console.log('Content Length:', text.length, '자')
+            console.log('Usage:', response.usage)
+            console.log('=======================')
+
+            if (!isTruncated) {
+              continueWriting = false
+              break
+            }
+
+            conversation.push({ role: 'assistant', content: text })
+            conversation.push({
+              role: 'user',
+              content: `[이전 응답 이어서 작성]\n이미 작성한 내용을 반복하지 말고, 남아있는 소제목의 상담 내용을 동일한 형식으로 계속 작성하세요.\n\n**절대 금지 - 반드시 준수하세요:**\n- 절대로 "이하 생략", "동일한 방식으로 작성", "생략" 등의 표현을 사용하지 마세요.\n- 구분선 문자(---, === 등)를 절대 사용하지 마세요.\n- **절대 금지: 소제목 앞에 "1. ", "2. ", "3. " 같은 번호를 추가하지 마세요.**\n- **절대 금지: "1. 1-1. 제목" 같은 형식은 절대 사용하지 마세요.**\n- 제공된 소제목 형식을 정확히 그대로 사용하고, 번호를 추가하거나 변경하지 마세요.\n- 예: "1-1. 제목"이 제공되면 "1-1. 제목" 그대로 사용. "1. 1-1. 제목" ❌\n- 예: "제목"이 제공되면 "제목" 그대로 사용. "1. 제목" ❌\n- 빈 번호만 있는 줄(예: "1.", "2.")을 생성하지 마세요.\n- 남아있는 모든 소제목에 대해 각각 ${charCount}자 내외로 완전하고 구체적인 내용을 반드시 작성해야 합니다.\n- 소제목을 건너뛰거나 생략하지 마세요. 모든 소제목에 대해 실제 내용을 작성하세요.`
+            })
           }
 
-          conversation.push({ role: 'assistant', content: text })
-          conversation.push({
-            role: 'user',
-            content: `[이전 응답 이어서 작성]\n이미 작성한 내용을 반복하지 말고, 남아있는 소제목의 상담 내용을 동일한 형식으로 계속 작성하세요.`
-          })
-        }
+          return accumulatedText
+        } else {
+          // Claude API 호출
+          const conversation: ClaudeMessage[] = [
+            ...baseMessages,
+            { role: 'user', content: combinedInstruction }
+          ]
+          let accumulatedText = ''
+          let attempt = 0
+          let continueWriting = true
 
-        return accumulatedText
+          while (continueWriting && attempt < 6) {
+            attempt += 1
+            const response = await callClaudeAPI(conversation, selectedModel)
+            const { text, isTruncated } = processClaudeResponse(response)
+            accumulatedText += accumulatedText ? `\n\n${text}` : text
+
+            console.log('=== Claude 전체 응답 ===')
+            console.log('시도 횟수:', attempt)
+            console.log('Stop Reason:', response.stop_reason)
+            console.log('Content Length:', text.length, '자')
+            console.log('Usage:', response.usage)
+            console.log('=======================')
+
+            if (!isTruncated) {
+              continueWriting = false
+              break
+            }
+
+            conversation.push({ role: 'assistant', content: text })
+            conversation.push({
+              role: 'user',
+              content: `[이전 응답 이어서 작성]\n이미 작성한 내용을 반복하지 말고, 남아있는 소제목의 상담 내용을 동일한 형식으로 계속 작성하세요.\n\n**절대 금지 - 반드시 준수하세요:**\n- 절대로 "이하 생략", "동일한 방식으로 작성", "생략" 등의 표현을 사용하지 마세요.\n- 구분선 문자(---, === 등)를 절대 사용하지 마세요.\n- **절대 금지: 소제목 앞에 "1. ", "2. ", "3. " 같은 번호를 추가하지 마세요.**\n- **절대 금지: "1. 1-1. 제목" 같은 형식은 절대 사용하지 마세요.**\n- 제공된 소제목 형식을 정확히 그대로 사용하고, 번호를 추가하거나 변경하지 마세요.\n- 예: "1-1. 제목"이 제공되면 "1-1. 제목" 그대로 사용. "1. 1-1. 제목" ❌\n- 예: "제목"이 제공되면 "제목" 그대로 사용. "1. 제목" ❌\n- 빈 번호만 있는 줄(예: "1.", "2.")을 생성하지 마세요.\n- 남아있는 모든 소제목에 대해 각각 ${charCount}자 내외로 완전하고 구체적인 내용을 반드시 작성해야 합니다.\n- 소제목을 건너뛰거나 생략하지 마세요. 모든 소제목에 대해 실제 내용을 작성하세요.`
+            })
+          }
+
+          return accumulatedText
+        }
       }
 
-      const fullText = await fetchFullResponse()
+      let fullText = ''
+      try {
+        console.log('=== fetchFullResponse 시작 ===')
+        fullText = await fetchFullResponse()
+        console.log('=== fetchFullResponse 완료 ===')
+        console.log('전체 텍스트 길이:', fullText.length, '자')
+      } catch (fetchError) {
+        console.error('fetchFullResponse 에러:', fetchError)
+        throw fetchError
+      }
 
       const splitByTitles = (text: string, titles: string[]) => {
-        if (!titles.length) {
+        try {
+          console.log('=== splitByTitles 시작 ===')
+          console.log('텍스트 길이:', text.length)
+          console.log('제목 개수:', titles.length)
+          
+          if (!titles.length) {
+            console.log('제목이 없어서 전체를 하나의 섹션으로 반환')
+            return [{ title: title, content: text.trim() }]
+          }
+
+          const sections: Array<{ title: string; content: string }> = []
+          let cursor = 0
+
+          titles.forEach((sectionTitle, index) => {
+            const safeTitle = sectionTitle.trim()
+            // 원본 제목 그대로 사용 (번호 추가하지 않음)
+            // Claude가 이미 번호를 추가했을 수 있으므로 여러 패턴으로 찾기
+            const patterns = [
+              `${index + 1}. ${safeTitle}`,  // "1. 1-1. 제목" 형식
+              `${index + 1}. ${safeTitle.replace(/^\d+\.\s*/, '')}`,  // "1. 제목" 형식 (이미 번호가 있는 경우)
+              safeTitle  // 원본 그대로
+            ]
+            
+            let foundIndex = -1
+            let matchedPattern = ''
+            
+            for (const pattern of patterns) {
+              foundIndex = text.indexOf(pattern, cursor)
+              if (foundIndex !== -1) {
+                matchedPattern = pattern
+                break
+              }
+            }
+            
+            if (foundIndex !== -1) {
+              if (sections.length) {
+                const previous = sections[sections.length - 1]
+                previous.content = text.slice(cursor, foundIndex).trim()
+              }
+              // 원본 제목 그대로 저장 (번호 추가하지 않음)
+              sections.push({ title: safeTitle, content: '' })
+              cursor = foundIndex + matchedPattern.length
+            } else {
+              console.warn(`제목을 찾을 수 없음: ${safeTitle}`)
+            }
+          })
+
+          if (sections.length) {
+            sections[sections.length - 1].content = text.slice(cursor).trim()
+            const filteredSections = sections.filter(section => section.content.length > 0)
+            console.log('=== splitByTitles 완료 ===')
+            console.log('생성된 섹션 개수:', filteredSections.length)
+            return filteredSections
+          }
+
+          console.log('섹션을 찾지 못해 전체를 하나의 섹션으로 반환')
+          return [{ title: title, content: text.trim() }]
+        } catch (splitError) {
+          console.error('splitByTitles 에러:', splitError)
+          // 에러가 발생해도 최소한 전체 텍스트를 반환
           return [{ title: title, content: text.trim() }]
         }
-
-        const sections: Array<{ title: string; content: string }> = []
-        let cursor = 0
-
-        titles.forEach((sectionTitle, index) => {
-          const safeTitle = sectionTitle.trim()
-          const foundIndex = text.indexOf(safeTitle, cursor)
-          if (foundIndex !== -1) {
-            if (sections.length) {
-              const previous = sections[sections.length - 1]
-              previous.content = text.slice(cursor, foundIndex).trim()
-            }
-            sections.push({ title: safeTitle, content: '' })
-            cursor = foundIndex + safeTitle.length
-          }
-        })
-
-        if (sections.length) {
-          sections[sections.length - 1].content = text.slice(cursor).trim()
-          return sections.filter(section => section.content.length > 0)
-        }
-
-        return [{ title: title, content: text.trim() }]
       }
 
-      const sections = splitByTitles(fullText, displaySubtitles.length ? displaySubtitles : developerSubtitles)
+      let sections: Array<{ title: string; content: string }> = []
+      try {
+        console.log('=== splitByTitles 호출 ===')
+        sections = splitByTitles(fullText, displaySubtitles.length ? displaySubtitles : developerSubtitles)
+        console.log('=== splitByTitles 완료 ===')
+        console.log('최종 섹션 개수:', sections.length)
+      } catch (splitError) {
+        console.error('splitByTitles 호출 에러:', splitError)
+        // 에러가 발생해도 최소한 전체 텍스트를 섹션으로 만들어서 표시
+        sections = [{ title: title, content: fullText.trim() }]
+      }
+
+      // 시간 측정 종료 및 포맷팅
+      const endTime = Date.now()
+      const elapsedTime = endTime - startTime
+      const formattedTime = formatTime(elapsedTime)
+      setClaudeResponseTime(formattedTime)
 
       setClaudeSections(sections)
       setClaudeResult(fullText)
-      const resultEntry = { id: `${Date.now()}-${Math.random()}`, title, sections, savedAt: new Date().toISOString() }
+      const resultEntry = { 
+        id: `${Date.now()}-${Math.random()}`, 
+        title, 
+        sections, 
+        savedAt: new Date().toISOString(),
+        model: selectedModel,
+        responseTime: formattedTime
+      }
       setSavedResults(prev => {
         return [resultEntry, ...prev.slice(0, 19)]
       })
 
       setShowClaudeResult(true)
     } catch (error) {
-      console.error('Claude API 호출 오류:', error)
-      const errorMessage = error instanceof Error 
-        ? error.message 
-        : '상담 결과를 생성하는 중 오류가 발생했습니다.'
-      console.error('Error details:', {
-        message: errorMessage,
-        error: error,
-        stack: error instanceof Error ? error.stack : undefined
-      })
+      console.error('=== Claude API 호출 오류 ===')
+      console.error('에러 타입:', typeof error)
+      console.error('에러 객체:', error)
+      console.error('에러 메시지:', error instanceof Error ? error.message : String(error))
+      console.error('에러 스택:', error instanceof Error ? error.stack : '스택 정보 없음')
+      
+      if (error instanceof Error) {
+        console.error('Error.name:', error.name)
+        console.error('Error.cause:', error.cause)
+      }
+      
+      // 추가 디버깅 정보
+      console.error('현재 상태:')
+      console.error('- selectedModel:', selectedModel)
+      console.error('- title:', title)
+      console.error('- selfName:', selfName)
+      
+      // 에러 메시지를 안전하게 문자열로 변환
+      let errorMessage = '상담 결과를 생성하는 중 오류가 발생했습니다.'
+      if (error instanceof Error) {
+        errorMessage = error.message || errorMessage
+      } else if (typeof error === 'object' && error !== null) {
+        // 객체인 경우 JSON으로 변환하거나 message 속성 확인
+        if ('message' in error && typeof (error as any).message === 'string') {
+          errorMessage = (error as any).message
+        } else {
+          errorMessage = JSON.stringify(error)
+        }
+      } else {
+        errorMessage = String(error) || errorMessage
+      }
+      
+      console.error('최종 에러 메시지:', errorMessage)
+      console.error('=======================')
+      
       alert(`상담 결과 생성 오류:\n${errorMessage}\n\n브라우저 콘솔(F12)에서 자세한 오류 정보를 확인하세요.`)
       setShowClaudeResult(false)
     } finally {
       setIsLoadingClaude(false)
+      console.log('=== handlePayment 완료 (finally) ===')
     }
   }
 
@@ -330,24 +582,172 @@ function FormContent() {
     setShowCoinCharge(false)
   }
 
-  const openSavedResult = (entry: { title: string; sections: Array<{ title: string; content: string }> }) => {
+  const openSavedResult = (entry: { 
+    title: string
+    sections: Array<{ title: string; content: string }>
+    model?: string
+    responseTime?: string
+  }) => {
     setClaudeSections(entry.sections)
     setClaudeResult(entry.sections.map(section => `${section.title}\n${section.content}`).join('\n\n'))
+    setClaudeModel(entry.model || '')
+    setClaudeResponseTime(entry.responseTime || '')
     setShowClaudeResult(true)
   }
 
+  const deleteSavedResult = (id: string) => {
+    if (confirm('저장된 상담 결과를 삭제하시겠습니까?')) {
+      setSavedResults(prev => prev.filter(entry => entry.id !== id))
+    }
+  }
+
+  const downloadSavedResult = (entry: {
+    title: string
+    sections: Array<{ title: string; content: string }>
+    model?: string
+    responseTime?: string
+    savedAt: string
+  }) => {
+    try {
+      // HTML 내용 생성
+      let htmlContent = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${entry.title}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+      line-height: 1.8;
+      color: #333;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+    .header {
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: bold;
+      margin: 0 0 15px 0;
+      color: #000;
+    }
+    .meta {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    .meta strong {
+      color: #333;
+    }
+    .section {
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0 0 15px 0;
+      color: #000;
+      border-bottom: 2px solid #e5e5e5;
+      padding-bottom: 10px;
+    }
+    .section-content {
+      font-size: 16px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>${entry.title}</h1>
+    <div class="meta">저장 시각: <strong>${new Date(entry.savedAt).toLocaleString('ko-KR')}</strong></div>
+    ${entry.model ? `<div class="meta">모델: <strong style="color: #4a90e2;">${entry.model}</strong></div>` : ''}
+    ${entry.responseTime ? `<div class="meta">소요 시간: <strong style="color: #e74c3c;">${entry.responseTime}</strong></div>` : ''}
+  </div>
+`
+
+      entry.sections.forEach((section) => {
+        htmlContent += `  <div class="section">
+    <h2 class="section-title">${section.title}</h2>
+    <div class="section-content">${section.content.replace(/\n/g, '<br>')}</div>
+  </div>
+`
+      })
+
+      htmlContent += `</body>
+</html>`
+
+      // Blob 생성 및 다운로드
+      const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      
+      // 파일명 생성 (제목에서 특수문자 제거)
+      const fileName = entry.title
+        .replace(/[<>:"/\\|?*]/g, '')
+        .substring(0, 50)
+        .trim() || '상담결과'
+      const timestamp = new Date(entry.savedAt).toISOString().split('T')[0]
+      link.download = `${fileName}_${timestamp}.html`
+      
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('다운로드 중 오류 발생:', error)
+      alert('다운로드 중 오류가 발생했습니다.')
+    }
+  }
+
+  // 페이지 진입 시 및 title 변경 시 로컬 스토리지에서 저장된 결과 불러오기
   useEffect(() => {
     if (typeof window === 'undefined') return
-    try {
-      const raw = localStorage.getItem('saved_claude_results')
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) {
-          setSavedResults(parsed)
+    const loaded = loadSavedResultsFromStorage()
+    if (loaded.length > 0) {
+      setSavedResults(loaded)
+    }
+  }, [title]) // title이 변경될 때마다 다시 불러오기
+
+  // 페이지 포커스 시에도 로컬 스토리지에서 최신 데이터 불러오기
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    
+    const handleFocus = () => {
+      const loaded = loadSavedResultsFromStorage()
+      if (loaded.length > 0) {
+        setSavedResults(loaded)
+      }
+    }
+
+    // 페이지 가시성 변경 시에도 불러오기
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        const loaded = loadSavedResultsFromStorage()
+        if (loaded.length > 0) {
+          setSavedResults(loaded)
         }
       }
-    } catch (error) {
-      console.error('저장된 상담 결과를 불러오는 중 오류가 발생했습니다.', error)
+    }
+
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [])
 
@@ -958,27 +1358,69 @@ function FormContent() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {savedResults.map((entry) => (
                 <div key={entry.id} style={{ backgroundColor: 'white', border: '1px solid #ffd5b0', borderRadius: '8px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-                  <div>
+                  <div style={{ flex: 1 }}>
                     <div style={{ fontSize: '16px', fontWeight: '600', color: '#333' }}>{entry.title}</div>
-                    <div style={{ fontSize: '12px', color: '#888' }}>
+                    <div style={{ fontSize: '12px', color: '#888', marginTop: '4px' }}>
                       저장 시각: {new Date(entry.savedAt).toLocaleString('ko-KR')}
                     </div>
+                    {(entry.model || entry.responseTime) && (
+                      <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                        {entry.model && (
+                          <span>모델: <strong style={{ color: '#4a90e2' }}>{entry.model}</strong></span>
+                        )}
+                        {entry.responseTime && (
+                          <span>소요 시간: <strong style={{ color: '#e74c3c' }}>{entry.responseTime}</strong></span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <button
-                    onClick={() => openSavedResult(entry)}
-                    style={{
-                      padding: '10px 18px',
-                      backgroundColor: '#ff7f50',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      fontSize: '13px',
-                      fontWeight: 600
-                    }}
-                  >
-                    다시 보기
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <button
+                      onClick={() => openSavedResult(entry)}
+                      style={{
+                        padding: '10px 18px',
+                        backgroundColor: '#ff7f50',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: 600
+                      }}
+                    >
+                      다시 보기
+                    </button>
+                    <button
+                      onClick={() => downloadSavedResult(entry)}
+                      style={{
+                        padding: '10px 18px',
+                        backgroundColor: '#28a745',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: 600
+                      }}
+                    >
+                      다운로드
+                    </button>
+                    <button
+                      onClick={() => deleteSavedResult(entry.id)}
+                      style={{
+                        padding: '10px 18px',
+                        backgroundColor: '#dc3545',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: 600
+                      }}
+                    >
+                      삭제
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1386,6 +1828,37 @@ function FormContent() {
                 ×
               </button>
             </div>
+
+            {/* 모델 및 시간 정보 (맨 처음 표시) */}
+            {(claudeModel || claudeResponseTime) && (
+              <div style={{
+                padding: '16px 30px',
+                backgroundColor: '#f8f9fa',
+                borderBottom: '1px solid #e5e5e5',
+                flexShrink: 0
+              }}>
+                <div style={{
+                  display: 'flex',
+                  gap: '20px',
+                  alignItems: 'center',
+                  fontSize: '14px',
+                  color: '#333'
+                }}>
+                  {claudeModel && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontWeight: '600', color: '#666' }}>모델:</span>
+                      <span style={{ fontWeight: '500', color: '#4a90e2' }}>{claudeModel}</span>
+                    </div>
+                  )}
+                  {claudeResponseTime && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontWeight: '600', color: '#666' }}>소요 시간:</span>
+                      <span style={{ fontWeight: '500', color: '#e74c3c' }}>{claudeResponseTime}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             
             {/* 내용 영역 (스크롤 가능) */}
             <div 
@@ -1444,6 +1917,8 @@ function FormContent() {
                   title,
                   savedAt: new Date().toISOString(),
                   sections: claudeSections,
+                  model: claudeModel || undefined,
+                  responseTime: claudeResponseTime || undefined,
                 }
                 setSavedResults(prev => [entry, ...prev].slice(0, 20))
                 alert('상담 결과가 저장되었습니다.')
