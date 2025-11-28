@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/app/lib/supabase'
 import type { Database } from '@/app/lib/supabase'
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+const db = supabase as SupabaseClient<Database>
 
 type PromptRecord = Database['public']['Tables']['prompts']['Row']
 type PromptInsert = Database['public']['Tables']['prompts']['Insert']
@@ -17,7 +20,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('prompts')
       .select('*')
       .eq('product_id', productId)
@@ -62,18 +65,20 @@ export async function POST(request: NextRequest) {
     }
 
     // upsert: 존재하면 업데이트, 없으면 생성
-    const { data, error } = await supabase
+    const upsertPayload: PromptInsert = {
+      product_id: productId,
+      system_prompt: systemPrompt || '',
+      worldview: worldview || '',
+      personality_prompt: personalityPrompt || '',
+      menu_subtitle_dev: menuSubtitleDev || '',
+      menu_subtitle: menuSubtitle || '',
+      subtitle_char_count: subtitleCharCount && subtitleCharCount.trim() !== '' ? String(subtitleCharCount) : null,
+      updated_at: new Date().toISOString(),
+    }
+
+    const { data, error } = await db
       .from('prompts')
-      .upsert<PromptInsert>({
-        product_id: productId,
-        system_prompt: systemPrompt || '',
-        worldview: worldview || '',
-        personality_prompt: personalityPrompt || '',
-        menu_subtitle_dev: menuSubtitleDev || '',
-        menu_subtitle: menuSubtitle || '',
-        subtitle_char_count: subtitleCharCount && subtitleCharCount.trim() !== '' ? String(subtitleCharCount) : null,
-        updated_at: new Date().toISOString(),
-      }, {
+      .upsert(upsertPayload as PromptInsert, {
         onConflict: 'product_id'
       })
       .select()
