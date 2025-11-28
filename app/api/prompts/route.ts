@@ -1,15 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/app/lib/supabase'
+import type { Database } from '@/app/lib/supabase'
 
-type PromptRecord = {
-  product_id: string
-  system_prompt: string | null
-  worldview: string | null
-  personality_prompt: string | null
-  menu_subtitle_dev: string | null
-  menu_subtitle: string | null
-  subtitle_char_count: string | number | null
-}
+type PromptRecord = Database['public']['Tables']['prompts']['Row']
+type PromptInsert = Database['public']['Tables']['prompts']['Insert']
 
 export async function GET(request: NextRequest) {
   try {
@@ -70,7 +64,7 @@ export async function POST(request: NextRequest) {
     // upsert: 존재하면 업데이트, 없으면 생성
     const { data, error } = await supabase
       .from('prompts')
-      .upsert({
+      .upsert<PromptInsert>({
         product_id: productId,
         system_prompt: systemPrompt || '',
         worldview: worldview || '',
