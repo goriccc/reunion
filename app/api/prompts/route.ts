@@ -24,10 +24,12 @@ export async function GET(request: NextRequest) {
     }
 
     const { data, error } = await supabase
-      .from<PromptRecord>('prompts')
+      .from('prompts')
       .select('*')
       .eq('product_id', productId)
       .single()
+
+    const prompt = data as PromptRecord | null
 
     if (error && error.code !== 'PGRST116') { // PGRST116 is "not found" error
       console.error('Supabase error:', error)
@@ -38,12 +40,12 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      systemPrompt: data?.system_prompt || '',
-      worldview: data?.worldview || '',
-      personalityPrompt: data?.personality_prompt || '',
-      menuSubtitleDev: data?.menu_subtitle_dev || '',
-      menuSubtitle: data?.menu_subtitle || '',
-      subtitleCharCount: data?.subtitle_char_count ? String(data.subtitle_char_count) : '',
+      systemPrompt: prompt?.system_prompt || '',
+      worldview: prompt?.worldview || '',
+      personalityPrompt: prompt?.personality_prompt || '',
+      menuSubtitleDev: prompt?.menu_subtitle_dev || '',
+      menuSubtitle: prompt?.menu_subtitle || '',
+      subtitleCharCount: prompt?.subtitle_char_count ? String(prompt.subtitle_char_count) : '',
     })
   } catch (error) {
     console.error('Error fetching prompts:', error)
@@ -67,7 +69,7 @@ export async function POST(request: NextRequest) {
 
     // upsert: 존재하면 업데이트, 없으면 생성
     const { data, error } = await supabase
-      .from<PromptRecord>('prompts')
+      .from('prompts')
       .upsert({
         product_id: productId,
         system_prompt: systemPrompt || '',
@@ -91,7 +93,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    return NextResponse.json({ success: true, data })
+    return NextResponse.json({ success: true, data: data as PromptRecord | null })
   } catch (error) {
     console.error('Error saving prompts:', error)
     return NextResponse.json(
