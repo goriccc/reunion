@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/app/lib/supabase'
 
+type PromptRecord = {
+  product_id: string
+  system_prompt: string | null
+  worldview: string | null
+  personality_prompt: string | null
+  menu_subtitle_dev: string | null
+  menu_subtitle: string | null
+  subtitle_char_count: string | number | null
+}
+
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams
@@ -14,7 +24,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { data, error } = await supabase
-      .from('prompts')
+      .from<PromptRecord>('prompts')
       .select('*')
       .eq('product_id', productId)
       .single()
@@ -57,7 +67,7 @@ export async function POST(request: NextRequest) {
 
     // upsert: 존재하면 업데이트, 없으면 생성
     const { data, error } = await supabase
-      .from('prompts')
+      .from<PromptRecord>('prompts')
       .upsert({
         product_id: productId,
         system_prompt: systemPrompt || '',
